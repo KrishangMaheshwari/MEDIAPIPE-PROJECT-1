@@ -1,96 +1,153 @@
 import cv2
 import mediapipe as mp
-import pyautogui
-import time 
+import time
+import threading
+from pynput.keyboard import Key, Controller
 
-# --- Setup ---
+# --- Initialize Mac Keyboard Controller ---
+keyboard = Controller()
+
+# --- Configuration ---
+SENSITIVITY = 0.10  # Lower = more sensitive
+DEADZONE = 0.02     # Range where steering stays centered
+current_key = None  # Tracks if 'a' or 'd' is currently held
+
+# --- Threaded Camera Class ---
+class WebCamStream:
+    def __init__(self, src=0):
+        self.stream = cv2.VideoCapture(src)
+        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        (self.grabbed, self.frame) = self.stream.read()
+        self.stopped = False
+
+    def start(self):
+        threading.Thread(target=self.update, args=(), daemon=True).start()
+        return self
+
+    def update(self):
+        while not self.stopped:
+            (self.grabbed, self.frame) = self.stream.read()
+
+    def read(self):
+        return self.frame
+
+    def stop(self):
+        self.stopped = True
+        self.stream.release()
+
+# --- Setup MediaPipe ---
 mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(static_image_mode=False, model_complexity=0, min_detection_confidence=0.5)
+mp_hands = mp.solutions.hands
+pose = mp_pose.Pose(model_complexity=0, min_detection_confidence=0.5)
+hands = mp_hands.Hands(model_complexity=0, min_detection_confidence=0.7)
 mp_drawing = mp.solutions.drawing_utils
 
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+# Start Stream
+vs = WebCamStream(src=0).start()
+time.sleep(2.0)
 
-last_spin_time = 0 
-target_fps = 40
-frame_duration = 1.0 / target_fps  # Time per frame (approx 0.033s)
+prev_frame_time = 0
+quit_timer_start = None
 
-while cap.isOpened():
-    start_time = time.time()  # Start timing the loop
+while True:
+    frame = vs.read()
+    if frame is None: continue
 
-    success, frame = cap.read()
-    if not success: break
+    # 1. Calculate FPS
+    new_frame_time = time.time()
+    fps = 1 / (max(new_frame_time - prev_frame_time, 0.001))
+    prev_frame_time = new_frame_time
 
-    frame = cv2.resize(frame, (640, 480)) 
+    # 2. Prep frame
     frame = cv2.flip(frame, 1)
+    h, w, _ = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = pose.process(rgb_frame)
+    
+    # Process models
+    pose_results = pose.process(rgb_frame)
+    hand_results = hands.process(rgb_frame)
 
     active_inputs = []
+    quit_gesture_active = False
 
-    if results.pose_landmarks:
-        landmarks = results.pose_landmarks.landmark
-        nose = landmarks[mp_pose.PoseLandmark.NOSE]
-        l_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
-        r_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
-        r_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST]
-        l_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST]
+    # --- HAND LOGIC: Peace Sign to Quit ---
+    if hand_results.multi_hand_landmarks:
+        for hand_lms in hand_results.multi_hand_landmarks:
+            index_up = hand_lms.landmark[8].y < hand_lms.landmark[6].y
+            middle_up = hand_lms.landmark[12].y < hand_lms.landmark[10].y
+            ring_down = hand_lms.landmark[16].y > hand_lms.landmark[14].y
+            pinky_down = hand_lms.landmark[20].y > hand_lms.landmark[18].y
 
-        shoulder_center_x = (l_shoulder.x + r_shoulder.x) / 2
-        current_time = time.time()
+            if index_up and middle_up and ring_down and pinky_down:
+                quit_gesture_active = True
+                mp_drawing.draw_landmarks(frame, hand_lms, mp_hands.HAND_CONNECTIONS)
 
-        # 1. Spin Logic
-        if nose.x > shoulder_center_x + 0.15 and (current_time - last_spin_time > 1.5):
-            pyautogui.press('s', presses=2, interval=0.05) 
-            last_spin_time = current_time
-            active_inputs.append("SPIN (S+S)")
+    # --- QUIT TIMER ---
+    if quit_gesture_active:
+        if quit_timer_start is None:
+            quit_timer_start = time.time()
+        elapsed = time.time() - quit_timer_start
+        active_inputs.append(f"QUITTING IN {max(0, 3 - int(elapsed))}s")
+        if elapsed >= 3:
+            break
+    else:
+        quit_timer_start = None
 
-        # 2. Steering Logic
-        if nose.x < shoulder_center_x - 0.05:
-            pyautogui.keyDown('a')
-            pyautogui.keyUp('d')
+    # --- POSE LOGIC (Steering & Braking) ---
+    if pose_results.pose_landmarks and not quit_gesture_active:
+        lms = pose_results.pose_landmarks.landmark
+        nose = lms[mp_pose.PoseLandmark.NOSE]
+        l_shldr = lms[mp_pose.PoseLandmark.LEFT_SHOULDER]
+        r_shldr = lms[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+        l_wrist = lms[mp_pose.PoseLandmark.LEFT_WRIST]
+
+        shldr_x = (l_shldr.x + r_shldr.x) / 2
+        diff = nose.x - shldr_x
+
+        # --- LAG-FREE STEERING ---
+        if diff < -DEADZONE:
+            if current_key != 'a':
+                keyboard.release('d')
+                keyboard.press('a')
+                current_key = 'a'
             active_inputs.append("STEER LEFT (A)")
-        elif nose.x > shoulder_center_x + 0.05:
-            pyautogui.keyDown('d')
-            pyautogui.keyUp('a')
+        elif diff > DEADZONE:
+            if current_key != 'd':
+                keyboard.release('a')
+                keyboard.press('d')
+                current_key = 'd'
             active_inputs.append("STEER RIGHT (D)")
         else:
-            pyautogui.keyUp('a')
-            pyautogui.keyUp('d')
+            if current_key is not None:
+                keyboard.release('a')
+                keyboard.release('d')
+                current_key = None
+            active_inputs.append("STRAIGHT")
 
-        # 3. Jump Logic
-        if r_wrist.y < r_shoulder.y:
-            pyautogui.press('space')
-            active_inputs.append("JUMP (SPACE)")
-
-        # 4. Brake/Back Logic
-        if l_wrist.y < l_shoulder.y:
-            pyautogui.keyDown('s')
+        # --- BRAKE LOGIC ---
+        if l_wrist.y < l_shldr.y:
+            keyboard.press('s')
             active_inputs.append("BRAKE (S)")
         else:
-            pyautogui.keyUp('s')
+            keyboard.release('s')
 
-        mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+        mp_drawing.draw_landmarks(frame, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
-    # --- HUD Overlay ---
-    cv2.rectangle(frame, (10, 10), (250, 150), (0, 0, 0), -1)
-    cv2.putText(frame, "CONTROLS ACTIVE:", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    
+    # --- HUD ---
+    cv2.rectangle(frame, (10, 10), (280, 160), (0, 0, 0), -1)
+    cv2.putText(frame, "MAC CONTROLLER", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
     for i, text in enumerate(active_inputs):
-        cv2.putText(frame, f"- {text}", (20, 75 + (i * 25)), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(frame, f"- {text}", (20, 75 + (i * 25)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+    cv2.putText(frame, f"FPS: {int(fps)}", (w - 110, h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
     cv2.imshow('Motion Controller HUD', frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'): break
 
-    # --- FPS Control Logic ---d
-    elapsed_time = time.time() - start_time
-    sleep_time = frame_duration - elapsed_time
-    if sleep_time > 0:
-        time.sleep(sleep_time)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
+# Cleanup
+keyboard.release('a')
+keyboard.release('d')
+keyboard.release('s')
+vs.stop()
 cv2.destroyAllWindows()
