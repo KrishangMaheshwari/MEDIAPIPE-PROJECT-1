@@ -53,7 +53,159 @@ engine_mode = None          # 1=Shooter, 2=Racing, 3=Flight
 pTime = 0                   # For FPS calculation
 program_running = True
 
-# --- SECTION 2: ADVANCED GRAPHICS ENGINE ---
+# --- SECTION 2: VISION Z DATA ANALYTICS MODULE ---
+# This module handles performance tracking, logging, and PDF generation.
+
+vision_z_active = False
+vz_start_time = 0
+vz_logs = []
+
+def system_locate_file(file_path):
+    """
+    OS-Agnostic file locator. Opens the folder containing the generated report.
+    """
+    path = os.path.abspath(file_path)
+    if platform.system() == "Windows":
+        subprocess.run(['explorer', '/select,', path])
+    elif platform.system() == "Darwin":
+        subprocess.run(['open', '-R', path])
+    else:
+        subprocess.run(['xdg-open', os.path.dirname(path)])
+
+def generate_pdf_report(engine_name):
+    """
+    Compiles the session logs into a professional PDF report.
+    """
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        
+        # Header
+        pdf.set_fill_color(10, 10, 30)
+        pdf.set_text_color(0, 255, 100)
+        pdf.set_font("Arial", 'B', 24)
+        pdf.cell(190, 20, f"VISION Z: {engine_name} ANALYTICS", ln=True, align='C', fill=True)
+        
+        # Subheader
+        pdf.set_font("Arial", '', 10)
+        pdf.set_text_color(100, 100, 100)
+        pdf.cell(190, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='C')
+        pdf.ln(10)
+        
+        # Table Headers
+        pdf.set_font("Arial", 'B', 11)
+        pdf.set_fill_color(50, 50, 50)
+        pdf.set_text_color(255, 255, 255)
+        
+        col_widths = [25, 45, 40, 55, 25]
+        headers = ["TIME", "EVENT", "DATA", "MISTAKE", "GAIN"]
+        
+        for i, h in enumerate(headers):
+            pdf.cell(col_widths[i], 10, h, 1, 0, 'C', True)
+        pdf.ln()
+        
+        # Table Data
+        pdf.set_font("Arial", '', 10)
+        pdf.set_text_color(0, 0, 0)
+        
+        for log in vz_logs:
+            for i, item in enumerate(log):
+                # Truncate long text to fit cells
+                text = str(item)[:20]
+                pdf.cell(col_widths[i], 8, text, 1)
+            pdf.ln()
+            
+        filename = f"VisionZ_{engine_name}_{datetime.now().strftime('%H%M%S')}.pdf"
+        pdf.output(filename)
+        return filename
+    except Exception as e:
+        print(f"Error generating PDF: {e}")
+        return "error.pdf"
+
+def log_vz(event, data, fix, gain):
+    """
+    Logs an event to the volatile memory if Vision Z is active.
+    Does not block the main thread.
+    """
+    if not vision_z_active: return
+    
+    elapsed = time.time() - vz_start_time
+    ts = f"{int(elapsed//60):02}:{elapsed%60:05.2f}"
+    
+    # Store log
+    vz_logs.append([ts, event, data, fix, gain])
+    
+    # Keep log size manageable in memory
+    if len(vz_logs) > 100:
+        vz_logs.pop(0)
+
+def show_vz_report_interface(engine_name):
+    """
+    Displays the High-Tech Report Interface with 'Encryption' animation.
+    Pauses the game loop while active.
+    """
+    print(">>> ENTERING REPORT INTERFACE...")
+    
+    while True:
+        report_bg = np.zeros((H, W, 3), dtype=np.uint8)
+        # Background gradient effect (simple grey fill)
+        report_bg[:] = (20, 20, 25)
+        
+        # Header Graphics
+        cv2.rectangle(report_bg, (0, 0), (W, 80), (0, 50, 0), -1)
+        cv2.putText(report_bg, f"VISION Z: {engine_name} PERFORMANCE", (50, 55), 1, 2.5, (255, 255, 255), 3)
+        
+        # Instructions
+        cv2.putText(report_bg, "PRESS [9] TO DOWNLOAD PDF REPORT", (50, 130), 1, 1.2, (0, 255, 255), 2)
+        cv2.putText(report_bg, "PRESS [ESC] TO RETURN TO GAME", (50, 160), 1, 1.2, (200, 200, 200), 2)
+        
+        # Display Logs Visualizer
+        y_pos = 250
+        cols = [50, 200, 450, 800, 1100]
+        
+        # Headers
+        headers = ["TIMESTAMP", "EVENT", "DATA", "REMEDY", "GAIN"]
+        for i, h in enumerate(headers):
+            cv2.putText(report_bg, h, (cols[i], 220), 1, 1, (100, 100, 255), 2)
+            
+        # Draw last 12 logs
+        for entry in vz_logs[-12:]:
+            # Conditional Formatting
+            color = (0, 255, 0) # Default Green
+            if "Spike" in entry[1] or "Aggressive" in entry[1] or "Miss" in entry[1]:
+                color = (0, 0, 255) # Red for bad events
+                
+            for i, text in enumerate(entry):
+                cv2.putText(report_bg, str(text), (cols[i], y_pos), 1, 0.8, color if i==1 else (200,200,200), 1)
+            y_pos += 35
+
+        cv2.imshow("TITAN X", report_bg)
+        
+        # Input Handling for Report Screen
+        k = cv2.waitKey(1) & 0xFF
+        if k == 27: # ESC
+            break
+        if k == ord('9'):
+            # The "Encryption" Animation
+            for i in range(101):
+                load_frame = report_bg.copy()
+                # Progress Bar
+                bar_w = 600
+                start_x = W//2 - bar_w//2
+                cv2.rectangle(load_frame, (start_x, H//2), (start_x + bar_w, H//2 + 40), (50, 50, 50), -1)
+                cv2.rectangle(load_frame, (start_x, H//2), (start_x + int(bar_w * (i/100)), H//2 + 40), (0, 255, 0), -1)
+                
+                # Tech Text
+                cv2.putText(load_frame, f"COMPILING NEURAL DATA: {i}%", (start_x, H//2 - 20), 1, 1.2, (255, 255, 255), 2)
+                cv2.imshow("TITAN X", load_frame)
+                cv2.waitKey(10)
+                
+            # Generate and Locate
+            fname = generate_pdf_report(engine_name)
+            system_locate_file(fname)
+            break
+
+# --- SECTION 3: ADVANCED GRAPHICS ENGINE ---
 
 def draw_glass_panel(img, x, y, w, h, title=None, color=(30, 30, 40), alpha=0.6, border_color=(0, 255, 255)):
     """
@@ -86,6 +238,22 @@ def draw_glass_panel(img, x, y, w, h, title=None, color=(30, 30, 40), alpha=0.6,
     # 4. Optional Title
     if title:
         cv2.putText(img, title.upper(), (x + 10, y + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
+def draw_radar(img, cx, cy, radius, angle):
+    """
+    Draws a rotating radar scanner for the Flight Engine.
+    """
+    # Radar Background
+    draw_glass_panel(img, cx - radius - 10, cy - radius - 10, radius * 2 + 20, radius * 2 + 20, color=(0, 20, 0), alpha=0.3)
+    cv2.circle(img, (cx, cy), radius, (0, 100, 0), 1)
+    cv2.circle(img, (cx, cy), radius // 2, (0, 100, 0), 1)
+    cv2.line(img, (cx - radius, cy), (cx + radius, cy), (0, 50, 0), 1)
+    cv2.line(img, (cx, cy - radius), (cx, cy + radius), (0, 50, 0), 1)
+    
+    # Scanner Line
+    end_x = int(cx + radius * math.cos(math.radians(angle)))
+    end_y = int(cy + radius * math.sin(math.radians(angle)))
+    cv2.line(img, (cx, cy), (end_x, end_y), (0, 255, 0), 2)
 
 # --- SECTION 4: ENGINE LOGIC CONTROLLERS ---
 
